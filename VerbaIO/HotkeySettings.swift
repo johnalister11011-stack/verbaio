@@ -1,12 +1,12 @@
-import Foundation
+import AppKit
 import Carbon.HIToolbox
 
 @Observable
 final class HotkeySettings {
-    var keyCode: Int64 {
+    var keyCode: UInt32 {
         didSet { save() }
     }
-    var modifierFlags: CGEventFlags {
+    var carbonModifiers: UInt32 {
         didSet { save() }
     }
     var isListeningForNewHotkey = false
@@ -14,52 +14,46 @@ final class HotkeySettings {
     private static let keyCodeKey = "hotkeyKeyCode"
     private static let modifierFlagsKey = "hotkeyModifierFlags"
 
-    // Default: ] key (keyCode 30), no modifiers
+    // Default: Cmd+Shift+Space
     init() {
         let defaults = UserDefaults.standard
         if defaults.object(forKey: Self.keyCodeKey) != nil {
-            self.keyCode = Int64(defaults.integer(forKey: Self.keyCodeKey))
-            self.modifierFlags = CGEventFlags(rawValue: UInt64(defaults.integer(forKey: Self.modifierFlagsKey)))
+            self.keyCode = UInt32(defaults.integer(forKey: Self.keyCodeKey))
+            self.carbonModifiers = UInt32(defaults.integer(forKey: Self.modifierFlagsKey))
         } else {
-            self.keyCode = 30 // ] key
-            self.modifierFlags = CGEventFlags(rawValue: 0)
+            self.keyCode = UInt32(kVK_Space)          // 49
+            self.carbonModifiers = UInt32(cmdKey | shiftKey)
         }
     }
 
     private func save() {
         let defaults = UserDefaults.standard
         defaults.set(Int(keyCode), forKey: Self.keyCodeKey)
-        defaults.set(Int(modifierFlags.rawValue), forKey: Self.modifierFlagsKey)
-    }
-
-    func matches(keyCode: Int64, flags: CGEventFlags) -> Bool {
-        guard self.keyCode == keyCode else { return false }
-
-        let relevantMask: UInt64 = CGEventFlags.maskCommand.rawValue
-            | CGEventFlags.maskShift.rawValue
-            | CGEventFlags.maskAlternate.rawValue
-            | CGEventFlags.maskControl.rawValue
-
-        let requiredMods = self.modifierFlags.rawValue & relevantMask
-        let eventMods = flags.rawValue & relevantMask
-
-        return requiredMods == eventMods
+        defaults.set(Int(carbonModifiers), forKey: Self.modifierFlagsKey)
     }
 
     var displayString: String {
         var parts: [String] = []
-
-        if modifierFlags.contains(.maskControl) { parts.append("⌃") }
-        if modifierFlags.contains(.maskAlternate) { parts.append("⌥") }
-        if modifierFlags.contains(.maskShift) { parts.append("⇧") }
-        if modifierFlags.contains(.maskCommand) { parts.append("⌘") }
-
+        if carbonModifiers & UInt32(controlKey) != 0 { parts.append("⌃") }
+        if carbonModifiers & UInt32(optionKey) != 0 { parts.append("⌥") }
+        if carbonModifiers & UInt32(shiftKey) != 0 { parts.append("⇧") }
+        if carbonModifiers & UInt32(cmdKey) != 0 { parts.append("⌘") }
         parts.append(keyName(for: keyCode))
         return parts.joined()
     }
 
-    func keyName(for code: Int64) -> String {
-        let names: [Int64: String] = [
+    // Convert NSEvent modifier flags to Carbon modifiers
+    static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
+        var mods: UInt32 = 0
+        if flags.contains(.command) { mods |= UInt32(cmdKey) }
+        if flags.contains(.shift) { mods |= UInt32(shiftKey) }
+        if flags.contains(.option) { mods |= UInt32(optionKey) }
+        if flags.contains(.control) { mods |= UInt32(controlKey) }
+        return mods
+    }
+
+    func keyName(for code: UInt32) -> String {
+        let names: [UInt32: String] = [
             0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
             8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R",
             16: "Y", 17: "T", 18: "1", 19: "2", 20: "3", 21: "4", 22: "6",

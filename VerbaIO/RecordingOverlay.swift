@@ -95,26 +95,24 @@ final class OverlayWindowController {
 
         let view = RecordingOverlayView(state: state, onStop: onStop, onCancel: onCancel)
         let hostingView = NSHostingView(rootView: view)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 380, height: 140)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 380, height: 160)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 140),
-            styleMask: [.titled, .closable, .fullSizeContentView],
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 160),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "verba.io"
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
         window.level = .floating
-        window.backgroundColor = .windowBackgroundColor
         window.hasShadow = true
         window.contentView = hostingView
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 300, height: 120)
 
-        // Close button cancels the recording
+        // Closing the window cancels the recording
         let closeDelegate = WindowCloseDelegate(onClose: onCancel)
         self.windowDelegate = closeDelegate
         window.delegate = closeDelegate
@@ -128,6 +126,7 @@ final class OverlayWindowController {
         }
 
         window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
         self.window = window
     }
 

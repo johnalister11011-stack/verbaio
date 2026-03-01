@@ -1,5 +1,5 @@
 import AppKit
-import CoreGraphics
+import Carbon.HIToolbox
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let recordingState = RecordingState()
@@ -8,22 +8,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let audioRecorder = AudioRecorder()
     private let speechRecognizer = SpeechRecognizer()
     private let overlayController = OverlayWindowController()
-    fileprivate var eventTap: CFMachPort?
-    private var globalMonitor: Any?
+    private var hotkeyRef: EventHotKeyRef?
     private var localMonitor: Any?
+
+    private static let hotkeyID = EventHotKeyID(signature: OSType(0x5642494F), // "VBIO"
+                                                 id: 1)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         requestPermissions()
-        setupKeyMonitors()
+        installCarbonHotkeyHandler()
+        registerHotkey()
+
+        // Local monitor for when our own windows are focused
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 && self?.recordingState.isRecording == true {
+                self?.cancelRecording()
+                return nil
+            }
+            return event
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if let eventTap {
-            CGEvent.tapEnable(tap: eventTap, enable: false)
-        }
-        if let globalMonitor {
-            NSEvent.removeMonitor(globalMonitor)
-        }
+        unregisterHotkey()
         if let localMonitor {
             NSEvent.removeMonitor(localMonitor)
         }
@@ -38,97 +45,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // Accessibility is needed for auto-paste simulation
         let trusted = AXIsProcessTrustedWithOptions(
             [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
         )
         if !trusted {
-            NSLog("VerbaIO: Accessibility permission needed")
+            NSLog("VerbaIO: Accessibility permission needed for auto-paste")
         }
     }
 
-    // MARK: - Key Monitors
+    // MARK: - Carbon Global Hotkey
 
-    private func setupKeyMonitors() {
-        // Global monitor catches keys when other apps are focused
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handleKeyEvent(event)
+    private func installCarbonHotkeyHandler() {
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                      eventKind: UInt32(kEventHotKeyPressed))
+
+        let status = InstallEventHandler(
+            GetApplicationEventTarget(),
+            carbonHotkeyCallback,
+            1,
+            &eventType,
+            UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()),
+            nil
+        )
+
+        if status != noErr {
+            NSLog("VerbaIO: Failed to install Carbon hotkey handler: %d", status)
         }
-
-        // Local monitor catches keys when our app is focused
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if self?.handleKeyEvent(event) == true {
-                return nil // Consume the event
-            }
-            return event
-        }
-
-        // Also set up CGEvent tap for consuming hotkey globally (NSEvent global monitor can't consume)
-        setupEventTap()
     }
 
-    private func setupEventTap() {
-        let eventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
-            | (1 << CGEventType.tapDisabledByTimeout.rawValue)
+    func registerHotkey() {
+        unregisterHotkey()
 
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: eventMask,
-            callback: globalKeyHandler,
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
-            NSLog("VerbaIO: CGEvent tap failed, using NSEvent monitors only")
-            return
+        var hotKeyRef: EventHotKeyRef?
+        let status = RegisterEventHotKey(
+            hotkeySettings.keyCode,
+            hotkeySettings.carbonModifiers,
+            AppDelegate.hotkeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+
+        if status == noErr {
+            self.hotkeyRef = hotKeyRef
+            NSLog("VerbaIO: Hotkey registered: %@", hotkeySettings.displayString)
+        } else {
+            NSLog("VerbaIO: Failed to register hotkey: %d", status)
         }
-
-        self.eventTap = tap
-        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
     }
 
-    // Returns true if the event was handled
-    @discardableResult
-    func handleKeyEvent(_ event: NSEvent) -> Bool {
-        let keyCode = Int64(event.keyCode)
-
-        // If listening for a new hotkey, capture it
-        if hotkeySettings.isListeningForNewHotkey {
-            hotkeySettings.keyCode = keyCode
-            let relevantMods: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
-            let mods = event.modifierFlags.intersection(relevantMods)
-            var cgFlags = CGEventFlags(rawValue: 0)
-            if mods.contains(.command) { cgFlags.insert(.maskCommand) }
-            if mods.contains(.shift) { cgFlags.insert(.maskShift) }
-            if mods.contains(.option) { cgFlags.insert(.maskAlternate) }
-            if mods.contains(.control) { cgFlags.insert(.maskControl) }
-            hotkeySettings.modifierFlags = cgFlags
-            hotkeySettings.isListeningForNewHotkey = false
-            return true
+    private func unregisterHotkey() {
+        if let ref = hotkeyRef {
+            UnregisterEventHotKey(ref)
+            hotkeyRef = nil
         }
-
-        // Build CGEventFlags from NSEvent modifier flags
-        let mods = event.modifierFlags
-        var cgFlags = CGEventFlags(rawValue: 0)
-        if mods.contains(.command) { cgFlags.insert(.maskCommand) }
-        if mods.contains(.shift) { cgFlags.insert(.maskShift) }
-        if mods.contains(.option) { cgFlags.insert(.maskAlternate) }
-        if mods.contains(.control) { cgFlags.insert(.maskControl) }
-
-        // Check hotkey match
-        if hotkeySettings.matches(keyCode: keyCode, flags: cgFlags) {
-            toggleRecording()
-            return true
-        }
-
-        // Escape cancels
-        if keyCode == 53 && recordingState.isRecording {
-            cancelRecording()
-            return true
-        }
-
-        return false
     }
 
     // MARK: - Recording Toggle
@@ -219,7 +190,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let finalText = recordingState.transcriptionText
-
         recordingState.phase = .done
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
@@ -230,52 +200,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// MARK: - CGEvent Tap Callback (for consuming the hotkey so it doesn't type in apps)
+// MARK: - Carbon Hotkey Callback (C function)
 
-private func globalKeyHandler(
-    proxy: CGEventTapProxy,
-    type: CGEventType,
-    event: CGEvent,
-    userInfo: UnsafeMutableRawPointer?
-) -> Unmanaged<CGEvent>? {
-    guard let userInfo else {
-        return Unmanaged.passRetained(event)
+private func carbonHotkeyCallback(
+    nextHandler: EventHandlerCallRef?,
+    event: EventRef?,
+    userData: UnsafeMutableRawPointer?
+) -> OSStatus {
+    guard let userData else { return OSStatus(eventNotHandledErr) }
+
+    let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+
+    DispatchQueue.main.async {
+        delegate.toggleRecording()
     }
 
-    let delegate = Unmanaged<AppDelegate>.fromOpaque(userInfo).takeUnretainedValue()
-
-    // Re-enable tap if macOS disabled it
-    if type == .tapDisabledByTimeout {
-        if let tap = delegate.eventTap {
-            CGEvent.tapEnable(tap: tap, enable: true)
-        }
-        return Unmanaged.passRetained(event)
-    }
-
-    guard type == .keyDown else {
-        return Unmanaged.passRetained(event)
-    }
-
-    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-    let flags = event.flags
-
-    // Consume the hotkey so it doesn't type ']' in the focused app
-    if delegate.hotkeySettings.matches(keyCode: keyCode, flags: flags) {
-        // The NSEvent global monitor will handle the actual action
-        // We just consume the event here so the character doesn't get typed
-        DispatchQueue.main.async {
-            delegate.toggleRecording()
-        }
-        return nil
-    }
-
-    // Consume escape during recording
-    if keyCode == 53 && delegate.recordingState.isRecording {
-        DispatchQueue.main.async {
-            delegate.cancelRecording()
-        }
-        return nil
-    }
-
-    return Unmanaged.passRetained(event)
+    return noErr
 }

@@ -32,11 +32,9 @@ struct VerbaIO: App {
 
                 Divider()
 
-                Button(appDelegate.hotkeySettings.isListeningForNewHotkey
-                       ? "Press any key..."
-                       : "Hotkey: \(appDelegate.hotkeySettings.displayString)") {
-                    appDelegate.hotkeySettings.isListeningForNewHotkey = true
-                }
+                Text("Hotkey: \(appDelegate.hotkeySettings.displayString)")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
 
                 Divider()
 
