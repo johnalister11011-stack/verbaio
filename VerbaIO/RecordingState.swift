@@ -1,12 +1,21 @@
 import Foundation
 import Observation
 
+enum RecordingPhase {
+    case idle
+    case recording
+    case processing
+    case done
+}
+
 @Observable
 final class RecordingState {
     var isRecording = false
+    var phase: RecordingPhase = .idle
     var transcriptionText = ""
     var duration: TimeInterval = 0
     var error: String?
+    var wasCancelled = false
 
     private var timer: Timer?
 

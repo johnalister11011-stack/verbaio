@@ -3,6 +3,7 @@ import CoreGraphics
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let recordingState = RecordingState()
+    let hotkeySettings = HotkeySettings()
 
     private let audioRecorder = AudioRecorder()
     private let speechRecognizer = SpeechRecognizer()
@@ -23,14 +24,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Permissions
 
     private func requestPermissions() {
-        // Request speech recognition permission
         SpeechRecognizer.requestAuthorization { granted in
             if !granted {
                 self.recordingState.error = "Speech recognition permission denied"
             }
         }
 
-        // Check accessibility permission (needed for global hotkey + paste)
         let trusted = AXIsProcessTrustedWithOptions(
             [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
         )
@@ -41,7 +40,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Global Hotkey
 
-    private func setupGlobalHotkey() {
+    func setupGlobalHotkey() {
+        // Clean up existing tap
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+            self.eventTap = nil
+        }
+
         let eventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
 
         guard let tap = CGEvent.tapCreate(
@@ -53,7 +58,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
             print("Failed to create event tap. Accessibility permission may be needed.")
-            // Retry after a delay (user may be granting permission)
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
                 self?.setupGlobalHotkey()
             }
@@ -76,11 +80,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func cancelRecording() {
+        guard recordingState.isRecording else { return }
+
+        recordingState.wasCancelled = true
+        recordingState.isRecording = false
+        recordingState.phase = .idle
+        recordingState.stopTimer()
+
+        audioRecorder.stop()
+        speechRecognizer.stopRecognition()
+
+        overlayController.dismiss()
+        NSSound.beep()
+    }
+
     private func startRecording() {
         recordingState.transcriptionText = ""
         recordingState.error = nil
+        recordingState.wasCancelled = false
         recordingState.isRecording = true
+        recordingState.phase = .recording
         recordingState.startTimer()
+
+        // Play start sound
+        if let sound = NSSound(named: "Tink") {
+            sound.play()
+        }
 
         // Set up speech recognizer callbacks
         speechRecognizer.onPartialResult = { [weak self] text in
@@ -99,10 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Start speech recognition and get the buffer handler
         let appendBuffer = speechRecognizer.startRecognition()
-
-        // Feed audio buffers to the recognizer
         audioRecorder.bufferHandler = appendBuffer
 
         do {
@@ -110,27 +133,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             recordingState.error = error.localizedDescription
             recordingState.isRecording = false
+            recordingState.phase = .idle
             recordingState.stopTimer()
             return
         }
 
-        // Show overlay
-        overlayController.show(state: recordingState)
+        overlayController.show(
+            state: recordingState,
+            onStop: { [weak self] in self?.stopRecording() },
+            onCancel: { [weak self] in self?.cancelRecording() }
+        )
     }
 
     private func stopRecording() {
+        guard recordingState.isRecording else { return }
+
+        recordingState.phase = .processing
         recordingState.isRecording = false
         recordingState.stopTimer()
 
         audioRecorder.stop()
         speechRecognizer.stopRecognition()
 
-        // Dismiss overlay
-        overlayController.dismiss()
+        // Play stop sound
+        if let sound = NSSound(named: "Pop") {
+            sound.play()
+        }
 
-        // Auto-paste the transcription
         let finalText = recordingState.transcriptionText
-        PasteService.pasteText(finalText)
+
+        recordingState.phase = .done
+
+        // Brief delay to show "Done" state, then dismiss and paste
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.overlayController.dismiss()
+            self?.recordingState.phase = .idle
+            PasteService.pasteText(finalText)
+        }
     }
 }
 
@@ -146,20 +185,39 @@ private func globalKeyHandler(
         return Unmanaged.passRetained(event)
     }
 
-    let flags = event.flags
+    let delegate = Unmanaged<AppDelegate>.fromOpaque(userInfo).takeUnretainedValue()
+
     let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+    let flags = event.flags
 
-    // Cmd+Shift+Space: keyCode 49 = Space
-    let hasCmd = flags.contains(.maskCommand)
-    let hasShift = flags.contains(.maskShift)
-    let isSpace = keyCode == 49
+    // If listening for a new hotkey, capture it
+    if delegate.hotkeySettings.isListeningForNewHotkey {
+        DispatchQueue.main.async {
+            delegate.hotkeySettings.keyCode = keyCode
+            let relevantMask: UInt64 = CGEventFlags.maskCommand.rawValue
+                | CGEventFlags.maskShift.rawValue
+                | CGEventFlags.maskAlternate.rawValue
+                | CGEventFlags.maskControl.rawValue
+            delegate.hotkeySettings.modifierFlags = CGEventFlags(rawValue: flags.rawValue & relevantMask)
+            delegate.hotkeySettings.isListeningForNewHotkey = false
+        }
+        return nil // Consume the event
+    }
 
-    if hasCmd && hasShift && isSpace {
-        let delegate = Unmanaged<AppDelegate>.fromOpaque(userInfo).takeUnretainedValue()
+    // Check if the pressed key matches the configured hotkey
+    if delegate.hotkeySettings.matches(keyCode: keyCode, flags: flags) {
         DispatchQueue.main.async {
             delegate.toggleRecording()
         }
         return nil // Consume the event
+    }
+
+    // Escape cancels active recording
+    if keyCode == 53 && delegate.recordingState.isRecording {
+        DispatchQueue.main.async {
+            delegate.cancelRecording()
+        }
+        return nil
     }
 
     return Unmanaged.passRetained(event)

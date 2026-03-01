@@ -13,10 +13,30 @@ struct VerbaIO: App {
                     Divider()
                 }
 
-                Button("Toggle Recording (⌘⇧Space)") {
+                if let error = appDelegate.recordingState.error {
+                    Text(error)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.red)
+                    Divider()
+                }
+
+                Button(appDelegate.recordingState.isRecording ? "Stop & Paste" : "Start Recording") {
                     appDelegate.toggleRecording()
                 }
-                .keyboardShortcut(" ", modifiers: [.command, .shift])
+
+                if appDelegate.recordingState.isRecording {
+                    Button("Cancel Recording") {
+                        appDelegate.cancelRecording()
+                    }
+                }
+
+                Divider()
+
+                Button(appDelegate.hotkeySettings.isListeningForNewHotkey
+                       ? "Press any key..."
+                       : "Hotkey: \(appDelegate.hotkeySettings.displayString)") {
+                    appDelegate.hotkeySettings.isListeningForNewHotkey = true
+                }
 
                 Divider()
 
