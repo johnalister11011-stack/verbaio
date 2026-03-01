@@ -194,22 +194,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sound.play()
         }
 
-        let finalText = recordingState.transcriptionText
-        recordingState.phase = .done
-
-        // Dismiss overlay first
-        overlayController.dismiss()
-
-        // Re-activate the previous app so paste goes to the right place
         let targetApp = previousApp
         previousApp = nil
 
-        // Give the previous app time to regain focus, then paste
-        targetApp?.activate()
+        var didPaste = false
+        let performPaste: (String) -> Void = { [weak self] text in
+            guard !didPaste else { return }
+            didPaste = true
+            self?.recordingState.phase = .done
+            self?.overlayController.dismiss()
+            targetApp?.activate()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                self?.recordingState.phase = .idle
+                PasteService.pasteText(text)
+            }
+        }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-            self?.recordingState.phase = .idle
-            PasteService.pasteText(finalText)
+        // Wait for the final transcription result before pasting
+        speechRecognizer.onFinalResult = { text in
+            DispatchQueue.main.async { performPaste(text) }
+        }
+
+        // Timeout fallback: use whatever partial text we have after 3 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            performPaste(self?.recordingState.transcriptionText ?? "")
         }
     }
 }
