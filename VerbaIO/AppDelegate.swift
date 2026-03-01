@@ -8,11 +8,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let audioRecorder = AudioRecorder()
     private let speechRecognizer = SpeechRecognizer()
     private let overlayController = OverlayWindowController()
-    private var eventTap: CFMachPort?
+    fileprivate var eventTap: CFMachPort?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         requestPermissions()
-        setupGlobalHotkey()
+        // Delay hotkey setup slightly to allow accessibility permission to take effect
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.setupGlobalHotkey()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -47,7 +50,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.eventTap = nil
         }
 
+        // Listen for keyDown and tapDisabledByTimeout
         let eventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.tapDisabledByTimeout.rawValue)
 
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -57,7 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             callback: globalKeyHandler,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            print("Failed to create event tap. Accessibility permission may be needed.")
+            print("Failed to create event tap. Retrying in 3s...")
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
                 self?.setupGlobalHotkey()
             }
@@ -68,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        print("Event tap created successfully")
     }
 
     // MARK: - Recording Toggle
@@ -103,12 +109,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingState.phase = .recording
         recordingState.startTimer()
 
-        // Play start sound
         if let sound = NSSound(named: "Tink") {
             sound.play()
         }
 
-        // Set up speech recognizer callbacks
         speechRecognizer.onPartialResult = { [weak self] text in
             DispatchQueue.main.async {
                 self?.recordingState.transcriptionText = text
@@ -155,7 +159,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audioRecorder.stop()
         speechRecognizer.stopRecognition()
 
-        // Play stop sound
         if let sound = NSSound(named: "Pop") {
             sound.play()
         }
@@ -164,7 +167,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         recordingState.phase = .done
 
-        // Brief delay to show "Done" state, then dismiss and paste
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.overlayController.dismiss()
             self?.recordingState.phase = .idle
@@ -181,11 +183,24 @@ private func globalKeyHandler(
     event: CGEvent,
     userInfo: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
-    guard type == .keyDown, let userInfo else {
+    guard let userInfo else {
         return Unmanaged.passRetained(event)
     }
 
     let delegate = Unmanaged<AppDelegate>.fromOpaque(userInfo).takeUnretainedValue()
+
+    // Re-enable the tap if macOS disabled it due to timeout
+    if type == .tapDisabledByTimeout {
+        if let tap = delegate.eventTap {
+            CGEvent.tapEnable(tap: tap, enable: true)
+            print("Event tap re-enabled after timeout")
+        }
+        return Unmanaged.passRetained(event)
+    }
+
+    guard type == .keyDown else {
+        return Unmanaged.passRetained(event)
+    }
 
     let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
     let flags = event.flags
@@ -201,7 +216,7 @@ private func globalKeyHandler(
             delegate.hotkeySettings.modifierFlags = CGEventFlags(rawValue: flags.rawValue & relevantMask)
             delegate.hotkeySettings.isListeningForNewHotkey = false
         }
-        return nil // Consume the event
+        return nil
     }
 
     // Check if the pressed key matches the configured hotkey
@@ -209,7 +224,7 @@ private func globalKeyHandler(
         DispatchQueue.main.async {
             delegate.toggleRecording()
         }
-        return nil // Consume the event
+        return nil
     }
 
     // Escape cancels active recording

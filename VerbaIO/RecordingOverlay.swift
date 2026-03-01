@@ -83,58 +83,70 @@ struct RecordingOverlayView: View {
         }
         .padding(16)
         .frame(width: 380)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.quaternary, lineWidth: 0.5)
-        )
     }
 }
 
-final class OverlayPanel: NSPanel {
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
-}
-
 final class OverlayWindowController {
-    private var panel: OverlayPanel?
+    private var window: NSWindow?
+    private var windowDelegate: WindowCloseDelegate?
 
     func show(state: RecordingState, onStop: @escaping () -> Void, onCancel: @escaping () -> Void) {
-        guard panel == nil else { return }
+        guard window == nil else { return }
 
         let view = RecordingOverlayView(state: state, onStop: onStop, onCancel: onCancel)
         let hostingView = NSHostingView(rootView: view)
         hostingView.frame = NSRect(x: 0, y: 0, width: 380, height: 140)
 
-        let panel = OverlayPanel(
+        let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 380, height: 140),
-            styleMask: [.nonactivatingPanel, .fullSizeContentView, .borderless],
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        panel.isFloatingPanel = true
-        panel.level = .floating
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hasShadow = true
-        panel.contentView = hostingView
-        panel.isMovableByWindowBackground = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.title = "verba.io"
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isMovableByWindowBackground = true
+        window.level = .floating
+        window.backgroundColor = .windowBackgroundColor
+        window.hasShadow = true
+        window.contentView = hostingView
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isReleasedWhenClosed = false
+
+        // Close button cancels the recording
+        let closeDelegate = WindowCloseDelegate(onClose: onCancel)
+        self.windowDelegate = closeDelegate
+        window.delegate = closeDelegate
 
         // Center on screen
         if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
             let x = screenFrame.midX - 190
             let y = screenFrame.midY + 100
-            panel.setFrameOrigin(NSPoint(x: x, y: y))
+            window.setFrameOrigin(NSPoint(x: x, y: y))
         }
 
-        panel.orderFrontRegardless()
-        self.panel = panel
+        window.makeKeyAndOrderFront(nil)
+        self.window = window
     }
 
     func dismiss() {
-        panel?.close()
-        panel = nil
+        window?.delegate = nil
+        window?.close()
+        window = nil
+        windowDelegate = nil
+    }
+}
+
+final class WindowCloseDelegate: NSObject, NSWindowDelegate {
+    private let onClose: () -> Void
+
+    init(onClose: @escaping () -> Void) {
+        self.onClose = onClose
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onClose()
     }
 }
