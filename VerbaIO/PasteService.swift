@@ -1,5 +1,4 @@
 import AppKit
-import CoreGraphics
 
 enum PasteService {
     private static var savedClipboard: String?
@@ -15,31 +14,24 @@ enum PasteService {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
-        // Simulate Cmd+V via CGEvent
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            simulatePaste()
+        // Simulate Cmd+V via AppleScript (more reliable than CGEvent)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            let script = NSAppleScript(source: """
+                tell application "System Events"
+                    keystroke "v" using command down
+                end tell
+            """)
+            var error: NSDictionary?
+            script?.executeAndReturnError(&error)
+            if let error {
+                NSLog("VerbaIO: Paste error: %@", error)
+            }
 
             // Restore original clipboard after 3 seconds
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
                 restoreClipboard()
             }
         }
-    }
-
-    private static func simulatePaste() {
-        let source = CGEventSource(stateID: .combinedSessionState)
-
-        // Key down: Cmd+V (virtual key 0x09 = 'v')
-        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
-            return
-        }
-
-        keyDown.flags = .maskCommand
-        keyUp.flags = .maskCommand
-
-        keyDown.post(tap: .cgAnnotatedSessionEventTap)
-        keyUp.post(tap: .cgAnnotatedSessionEventTap)
     }
 
     private static func restoreClipboard() {

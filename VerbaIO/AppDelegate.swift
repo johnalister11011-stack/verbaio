@@ -118,7 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingState.stopTimer()
 
         audioRecorder.stop()
-        speechRecognizer.cancelRecognition()
+        speechRecognizer.stopRecognition()
 
         overlayController.dismiss()
 
@@ -188,33 +188,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingState.stopTimer()
 
         audioRecorder.stop()
+        speechRecognizer.stopRecognition()
 
         if let sound = NSSound(named: "Pop") {
             sound.play()
         }
 
+        let finalText = recordingState.transcriptionText
+        recordingState.phase = .done
+
+        // Dismiss overlay first
+        overlayController.dismiss()
+
+        // Re-activate the previous app so paste goes to the right place
         let targetApp = previousApp
         previousApp = nil
 
-        // Wait for the final transcription result before pasting
-        speechRecognizer.stopRecognition { [weak self] finalText in
-            guard let self else { return }
+        // Give the previous app time to regain focus, then paste
+        targetApp?.activate()
 
-            let text = finalText.isEmpty ? self.recordingState.transcriptionText : finalText
-            self.recordingState.transcriptionText = text
-            self.recordingState.phase = .done
-
-            // Dismiss overlay
-            self.overlayController.dismiss()
-
-            // Re-activate the previous app so paste goes to the right place
-            targetApp?.activate()
-
-            // Give the previous app time to regain focus, then paste
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                self.recordingState.phase = .idle
-                PasteService.pasteText(text)
-            }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.recordingState.phase = .idle
+            PasteService.pasteText(finalText)
         }
     }
 }
