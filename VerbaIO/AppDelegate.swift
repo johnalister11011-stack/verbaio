@@ -9,18 +9,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let speechRecognizer = SpeechRecognizer()
     private let overlayController = OverlayWindowController()
     fileprivate var eventTap: CFMachPort?
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         requestPermissions()
-        // Delay hotkey setup slightly to allow accessibility permission to take effect
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            self?.setupGlobalHotkey()
-        }
+        setupKeyMonitors()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
+        }
+        if let globalMonitor {
+            NSEvent.removeMonitor(globalMonitor)
+        }
+        if let localMonitor {
+            NSEvent.removeMonitor(localMonitor)
         }
     }
 
@@ -37,20 +42,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
         )
         if !trusted {
-            print("Accessibility permission needed — a prompt should appear.")
+            NSLog("VerbaIO: Accessibility permission needed")
         }
     }
 
-    // MARK: - Global Hotkey
+    // MARK: - Key Monitors
 
-    func setupGlobalHotkey() {
-        // Clean up existing tap
-        if let eventTap {
-            CGEvent.tapEnable(tap: eventTap, enable: false)
-            self.eventTap = nil
+    private func setupKeyMonitors() {
+        // Global monitor catches keys when other apps are focused
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handleKeyEvent(event)
         }
 
-        // Listen for keyDown and tapDisabledByTimeout
+        // Local monitor catches keys when our app is focused
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if self?.handleKeyEvent(event) == true {
+                return nil // Consume the event
+            }
+            return event
+        }
+
+        // Also set up CGEvent tap for consuming hotkey globally (NSEvent global monitor can't consume)
+        setupEventTap()
+    }
+
+    private func setupEventTap() {
         let eventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
             | (1 << CGEventType.tapDisabledByTimeout.rawValue)
 
@@ -62,10 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             callback: globalKeyHandler,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            print("Failed to create event tap. Retrying in 3s...")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                self?.setupGlobalHotkey()
-            }
+            NSLog("VerbaIO: CGEvent tap failed, using NSEvent monitors only")
             return
         }
 
@@ -73,7 +86,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        print("Event tap created successfully")
+    }
+
+    // Returns true if the event was handled
+    @discardableResult
+    func handleKeyEvent(_ event: NSEvent) -> Bool {
+        let keyCode = Int64(event.keyCode)
+
+        // If listening for a new hotkey, capture it
+        if hotkeySettings.isListeningForNewHotkey {
+            hotkeySettings.keyCode = keyCode
+            let relevantMods: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
+            let mods = event.modifierFlags.intersection(relevantMods)
+            var cgFlags = CGEventFlags(rawValue: 0)
+            if mods.contains(.command) { cgFlags.insert(.maskCommand) }
+            if mods.contains(.shift) { cgFlags.insert(.maskShift) }
+            if mods.contains(.option) { cgFlags.insert(.maskAlternate) }
+            if mods.contains(.control) { cgFlags.insert(.maskControl) }
+            hotkeySettings.modifierFlags = cgFlags
+            hotkeySettings.isListeningForNewHotkey = false
+            return true
+        }
+
+        // Build CGEventFlags from NSEvent modifier flags
+        let mods = event.modifierFlags
+        var cgFlags = CGEventFlags(rawValue: 0)
+        if mods.contains(.command) { cgFlags.insert(.maskCommand) }
+        if mods.contains(.shift) { cgFlags.insert(.maskShift) }
+        if mods.contains(.option) { cgFlags.insert(.maskAlternate) }
+        if mods.contains(.control) { cgFlags.insert(.maskControl) }
+
+        // Check hotkey match
+        if hotkeySettings.matches(keyCode: keyCode, flags: cgFlags) {
+            toggleRecording()
+            return true
+        }
+
+        // Escape cancels
+        if keyCode == 53 && recordingState.isRecording {
+            cancelRecording()
+            return true
+        }
+
+        return false
     }
 
     // MARK: - Recording Toggle
@@ -175,7 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// MARK: - Global Event Tap Callback
+// MARK: - CGEvent Tap Callback (for consuming the hotkey so it doesn't type in apps)
 
 private func globalKeyHandler(
     proxy: CGEventTapProxy,
@@ -189,11 +244,10 @@ private func globalKeyHandler(
 
     let delegate = Unmanaged<AppDelegate>.fromOpaque(userInfo).takeUnretainedValue()
 
-    // Re-enable the tap if macOS disabled it due to timeout
+    // Re-enable tap if macOS disabled it
     if type == .tapDisabledByTimeout {
         if let tap = delegate.eventTap {
             CGEvent.tapEnable(tap: tap, enable: true)
-            print("Event tap re-enabled after timeout")
         }
         return Unmanaged.passRetained(event)
     }
@@ -205,29 +259,17 @@ private func globalKeyHandler(
     let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
     let flags = event.flags
 
-    // If listening for a new hotkey, capture it
-    if delegate.hotkeySettings.isListeningForNewHotkey {
-        DispatchQueue.main.async {
-            delegate.hotkeySettings.keyCode = keyCode
-            let relevantMask: UInt64 = CGEventFlags.maskCommand.rawValue
-                | CGEventFlags.maskShift.rawValue
-                | CGEventFlags.maskAlternate.rawValue
-                | CGEventFlags.maskControl.rawValue
-            delegate.hotkeySettings.modifierFlags = CGEventFlags(rawValue: flags.rawValue & relevantMask)
-            delegate.hotkeySettings.isListeningForNewHotkey = false
-        }
-        return nil
-    }
-
-    // Check if the pressed key matches the configured hotkey
+    // Consume the hotkey so it doesn't type ']' in the focused app
     if delegate.hotkeySettings.matches(keyCode: keyCode, flags: flags) {
+        // The NSEvent global monitor will handle the actual action
+        // We just consume the event here so the character doesn't get typed
         DispatchQueue.main.async {
             delegate.toggleRecording()
         }
         return nil
     }
 
-    // Escape cancels active recording
+    // Consume escape during recording
     if keyCode == 53 && delegate.recordingState.isRecording {
         DispatchQueue.main.async {
             delegate.cancelRecording()
