@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let overlayController = OverlayWindowController()
     private var hotkeyRef: EventHotKeyRef?
     private var localMonitor: Any?
+    private var previousApp: NSRunningApplication?
 
     private static let hotkeyID = EventHotKeyID(signature: OSType(0x5642494F), // "VBIO"
                                                  id: 1)
@@ -45,7 +46,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Accessibility is needed for auto-paste simulation
         let trusted = AXIsProcessTrustedWithOptions(
             [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
         )
@@ -56,7 +56,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Carbon Global Hotkey
 
-    private func installCarbonHotkeyHandler() {
+    @discardableResult
+    private func installCarbonHotkeyHandler() -> Bool {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                       eventKind: UInt32(kEventHotKeyPressed))
 
@@ -68,13 +69,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()),
             nil
         )
-
-        if status != noErr {
-            NSLog("VerbaIO: Failed to install Carbon hotkey handler: %d", status)
-        }
+        return status == noErr
     }
 
-    func registerHotkey() {
+    @discardableResult
+    func registerHotkey() -> Bool {
         unregisterHotkey()
 
         var hotKeyRef: EventHotKeyRef?
@@ -89,10 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if status == noErr {
             self.hotkeyRef = hotKeyRef
-            NSLog("VerbaIO: Hotkey registered: %@", hotkeySettings.displayString)
-        } else {
-            NSLog("VerbaIO: Failed to register hotkey: %d", status)
         }
+        return status == noErr
     }
 
     private func unregisterHotkey() {
@@ -124,10 +121,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         speechRecognizer.stopRecognition()
 
         overlayController.dismiss()
+
+        // Return focus to previous app
+        previousApp?.activate()
+        previousApp = nil
+
         NSSound.beep()
     }
 
     private func startRecording() {
+        // Remember which app is currently focused BEFORE we show our window
+        previousApp = NSWorkspace.shared.frontmostApplication
+
         recordingState.transcriptionText = ""
         recordingState.error = nil
         recordingState.wasCancelled = false
@@ -192,8 +197,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let finalText = recordingState.transcriptionText
         recordingState.phase = .done
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.overlayController.dismiss()
+        // Dismiss overlay first
+        overlayController.dismiss()
+
+        // Re-activate the previous app so paste goes to the right place
+        let targetApp = previousApp
+        previousApp = nil
+
+        // Give the previous app time to regain focus, then paste
+        targetApp?.activate()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             self?.recordingState.phase = .idle
             PasteService.pasteText(finalText)
         }

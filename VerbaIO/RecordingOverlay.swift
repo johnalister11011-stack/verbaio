@@ -86,54 +86,62 @@ struct RecordingOverlayView: View {
     }
 }
 
+// NSPanel subclass that has traffic lights but doesn't steal focus
+final class OverlayPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 final class OverlayWindowController {
-    private var window: NSWindow?
+    private var panel: OverlayPanel?
     private var windowDelegate: WindowCloseDelegate?
 
     func show(state: RecordingState, onStop: @escaping () -> Void, onCancel: @escaping () -> Void) {
-        guard window == nil else { return }
+        guard panel == nil else { return }
 
         let view = RecordingOverlayView(state: state, onStop: onStop, onCancel: onCancel)
         let hostingView = NSHostingView(rootView: view)
         hostingView.frame = NSRect(x: 0, y: 0, width: 380, height: 160)
 
-        let window = NSWindow(
+        let panel = OverlayPanel(
             contentRect: NSRect(x: 0, y: 0, width: 380, height: 160),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.titled, .closable, .miniaturizable, .nonactivatingPanel, .utilityWindow],
             backing: .buffered,
             defer: false
         )
-        window.title = "verba.io"
-        window.isMovableByWindowBackground = true
-        window.level = .floating
-        window.hasShadow = true
-        window.contentView = hostingView
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 300, height: 120)
+        panel.title = "verba.io"
+        panel.isMovableByWindowBackground = true
+        panel.level = .floating
+        panel.isFloatingPanel = true
+        panel.hasShadow = true
+        panel.contentView = hostingView
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isReleasedWhenClosed = false
+        panel.minSize = NSSize(width: 300, height: 120)
+        panel.hidesOnDeactivate = false
 
         // Closing the window cancels the recording
         let closeDelegate = WindowCloseDelegate(onClose: onCancel)
         self.windowDelegate = closeDelegate
-        window.delegate = closeDelegate
+        panel.delegate = closeDelegate
 
         // Center on screen
         if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
             let x = screenFrame.midX - 190
             let y = screenFrame.midY + 100
-            window.setFrameOrigin(NSPoint(x: x, y: y))
+            panel.setFrameOrigin(NSPoint(x: x, y: y))
         }
 
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        self.window = window
+        // orderFrontRegardless shows the panel without activating our app
+        panel.orderFrontRegardless()
+        self.panel = panel
     }
 
     func dismiss() {
-        window?.delegate = nil
-        window?.close()
-        window = nil
+        panel?.delegate = nil
+        panel?.close()
+        panel = nil
         windowDelegate = nil
     }
 }
